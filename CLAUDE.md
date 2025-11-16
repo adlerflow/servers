@@ -728,13 +728,248 @@ Projects may set environment variables via `.claude/settings.json`:
 
 These variables are available during development but should not be relied upon for server runtime behavior.
 
+### Hook System Deep Dive
+
+Claude Code's hook system allows you to run custom commands at specific points in the development lifecycle.
+
+#### Hook Lifecycle Events
+
+- **SessionStart** - Runs when a new session starts (ideal for installing dependencies)
+- **SessionEnd** - Runs when a session ends
+- **PreToolUse** - Runs before a tool is executed
+- **PostToolUse** - Runs after a tool completes (ideal for linting/building)
+- **Stop** - Runs when the agent finishes responding (ideal for git checks)
+- **SubagentStop** - Runs when subagents finish responding
+- **UserPromptSubmit** - Runs when a user submits a prompt
+- **Notification** - Triggers on notifications
+- **PreCompact** - Runs before context is compacted
+
+#### Hook Input Format
+
+Hooks receive JSON input via stdin:
+
+```json
+{
+  "session_id": "abc123",
+  "source": "startup|resume|clear|compact",
+  "transcript_path": "/path/to/transcript.jsonl",
+  "permission_mode": "default",
+  "hook_event_name": "SessionStart",
+  "cwd": "/workspace/repo",
+  "stop_hook_active": false
+}
+```
+
+#### Hook Output Format
+
+Hooks can control their execution mode by outputting JSON to stdout:
+
+```bash
+#!/bin/bash
+# Async mode - runs in background
+echo '{"async": true, "asyncTimeout": 300000}'
+
+# Your hook logic here
+npm install
+```
+
+**Async vs Synchronous:**
+- **Synchronous (default)**: Session waits for hook to complete. Safer, no race conditions.
+- **Async**: Hook runs in background. Faster session startup, but may cause race conditions.
+
+#### Hook Environment Variables
+
+Available in all hooks:
+
+- `$CLAUDE_PROJECT_DIR` - Repository root path
+- `$CLAUDE_ENV_FILE` - Path to write session environment variables
+- `$CLAUDE_CODE_REMOTE` - Set to "true" if running in Claude Code on the web
+
+**Setting session variables:**
+```bash
+echo 'export PYTHONPATH="."' >> "$CLAUDE_ENV_FILE"
+echo 'export NODE_ENV="development"' >> "$CLAUDE_ENV_FILE"
+```
+
+**Conditional execution (web only):**
+```bash
+if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
+  exit 0  # Skip on local installations
+fi
+```
+
+#### Hook Exit Codes
+
+- `0` - Success, continue normally
+- `1` - Error, display message but continue
+- `2` - Warning/blocking error, display message and may affect workflow
+
+#### Writing Effective Hooks
+
+**Best practices:**
+
+1. **Be idempotent** - Safe to run multiple times
+2. **Be fast** - Avoid long-running operations in synchronous hooks
+3. **Be non-interactive** - Never prompt for user input
+4. **Handle errors gracefully** - Check if commands exist before running
+5. **Use proper shebangs** - Start with `#!/bin/bash` or appropriate interpreter
+6. **Set error handling** - Use `set -euo pipefail` for bash scripts
+7. **Prevent recursion** - Check `stop_hook_active` in Stop hooks
+
+**Example: SessionStart hook for this repository**
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Only run in Claude Code on the web
+if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
+  exit 0
+fi
+
+# Check if npm is available
+if ! command -v npm &> /dev/null; then
+  echo "npm not found, skipping dependency installation" >&2
+  exit 0
+fi
+
+# Install dependencies (prefer 'install' over 'ci' for better caching)
+npm install
+
+# Install Python dependencies if needed
+if [ -d "src/time" ] || [ -d "src/git" ] || [ -d "src/fetch" ]; then
+  if command -v uv &> /dev/null; then
+    for dir in src/*/; do
+      if [ -f "${dir}pyproject.toml" ]; then
+        echo "Installing Python dependencies for ${dir}"
+        (cd "${dir}" && uv sync --frozen --all-extras --dev) || true
+      fi
+    done
+  fi
+fi
+
+exit 0
+```
+
+**Example: Stop hook to check for uncommitted changes**
+
+```bash
+#!/bin/bash
+
+# Read hook input
+input=$(cat)
+
+# Prevent recursion
+stop_hook_active=$(echo "$input" | jq -r '.stop_hook_active // false')
+if [[ "$stop_hook_active" = "true" ]]; then
+  exit 0
+fi
+
+# Only run in git repositories
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  exit 0
+fi
+
+# Check for uncommitted changes
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "⚠️  Uncommitted changes detected. Remember to commit and push!" >&2
+  exit 2
+fi
+
+# Check for unpushed commits
+current_branch=$(git branch --show-current)
+if [[ -n "$current_branch" ]]; then
+  if git rev-parse "origin/$current_branch" >/dev/null 2>&1; then
+    unpushed=$(git rev-list "origin/$current_branch..HEAD" --count 2>/dev/null) || unpushed=0
+    if [[ "$unpushed" -gt 0 ]]; then
+      echo "⚠️  $unpushed unpushed commit(s). Remember to push to origin!" >&2
+      exit 2
+    fi
+  fi
+fi
+
+exit 0
+```
+
+### Skills System
+
+Claude Code supports a **Skills** system - specialized agents that can be invoked for specific tasks.
+
+#### Available Skills
+
+Skills are located in `~/.claude/skills/` or `.claude/skills/` (project-specific).
+
+**session-start-hook skill**: Creates SessionStart hooks for dependency installation
+- Analyzes project dependencies (npm, Python, cargo, etc.)
+- Generates appropriate installation scripts
+- Validates linter and test execution
+- Commits and pushes the hook configuration
+
+#### Using Skills
+
+Skills are invoked with the `Skill` tool when the user's request matches the skill description.
+
+**Skill structure:**
+```markdown
+---
+name: skill-name
+description: When to use this skill
+---
+
+# Skill Instructions
+
+Detailed instructions for the AI assistant...
+```
+
+#### Creating Custom Skills
+
+To create a project-specific skill:
+
+```bash
+mkdir -p .claude/skills/my-skill
+cat > .claude/skills/my-skill/SKILL.md << 'EOF'
+---
+name: my-skill
+description: Description of when to use this skill
+---
+
+# My Custom Skill
+
+Instructions for what this skill does...
+EOF
+```
+
 ### Best Practices for Claude Code Users
 
 1. **Set up SessionStart hooks** to install dependencies automatically
+   - Use async mode for faster startup (if race conditions are acceptable)
+   - Prefer `npm install` over `npm ci` for better container caching
+   - Check for `$CLAUDE_CODE_REMOTE` to only run in web environments
+
 2. **Configure PostToolUse hooks** to run linters/formatters after edits
-3. **Use permissions** to prevent accidental destructive operations
-4. **Enable sandbox** for safer command execution
-5. **Configure MCP servers** this repository provides via `.mcp.json`
+   - Use pattern matching to only run on specific tools (e.g., `Edit|Write`)
+   - Set appropriate timeouts to prevent hanging
+   - Make hooks idempotent and fast
+
+3. **Use Stop hooks** for safety checks
+   - Check for uncommitted changes
+   - Verify tests pass before ending sessions
+   - Remind to push changes to remote
+
+4. **Use permissions** to prevent accidental destructive operations
+   - `allow`: Safe operations that don't need confirmation
+   - `ask`: Important operations that should be confirmed
+   - `deny`: Dangerous operations that should never run
+
+5. **Enable sandbox** for safer command execution
+   - Restricts filesystem and network access
+   - Configure `excludedCommands` for tools that don't work sandboxed
+   - Use `autoAllowBashIfSandboxed` to reduce prompts
+
+6. **Configure MCP servers** this repository provides via `.mcp.json`
+   - Test servers locally before configuring
+   - Use proper security boundaries
+   - Document server configurations
 
 ### Example .claude/settings.json for This Repository
 
