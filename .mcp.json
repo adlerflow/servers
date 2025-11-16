@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sequential-thinking": {
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/src/sequentialthinking/dist/index.js"
+      ],
+      "env": {
+        "DISABLE_THOUGHT_LOGGING": "false"
+      }
+    }
+  }
+}
