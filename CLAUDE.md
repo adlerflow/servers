@@ -580,6 +580,220 @@ uv run mcp-server-{name}
    - Keep changes minimal and focused
    - Ask for clarification in PR discussions
 
+## Claude Code Integration
+
+This repository is commonly used within **Claude Code**, Anthropic's official CLI tool. Understanding Claude Code's configuration system helps AI assistants work more effectively.
+
+### Repository Settings File
+
+Projects may have a `.claude/settings.json` file that configures Claude Code behavior. Key settings that affect development:
+
+**Permissions:**
+```json
+{
+  "permissions": {
+    "allow": ["Bash(npm run build:*)"],
+    "ask": ["Bash(npm publish:*)", "Bash(git push:*)"],
+    "deny": ["Bash(rm -rf:*)", "Read(.env)"],
+    "defaultMode": "default"
+  }
+}
+```
+
+**Hooks** - Commands that run automatically during development:
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm run lint:fix",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm install"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Common Hooks for This Repository
+
+**Recommended SessionStart Hook:**
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm install",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Recommended PostToolUse Hooks:**
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm run build --workspaces --if-present",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Understanding Hook Feedback
+
+When hooks run, you may see feedback like:
+```
+<user-prompt-submit-hook>
+Running pre-submission checks...
+✓ All tests passed
+</user-prompt-submit-hook>
+```
+
+**Important:** Treat hook feedback as if it came from the user. If a hook blocks an action or reports errors, adjust your approach accordingly.
+
+### Sandbox Mode Considerations
+
+Claude Code may run commands in a sandbox with restricted filesystem and network access. If sandbox violations occur:
+
+1. **Check the command** - Some commands may be excluded from sandboxing (configured in `excludedCommands`)
+2. **Verify paths** - Sandbox may restrict access to certain directories
+3. **Network restrictions** - Sandbox may block certain network operations
+4. **Adjust approach** - Use alternative methods if sandbox blocks necessary operations
+
+### MCP Server Development in Claude Code
+
+When developing MCP servers in this repository within Claude Code:
+
+1. **Test Locally First:**
+   ```bash
+   cd src/{server-name}
+   npm run build
+   node dist/index.js --help
+   ```
+
+2. **Use MCP Inspector:**
+   - Recommended for testing MCP servers
+   - Provides interactive testing environment
+   - See: https://github.com/modelcontextprotocol/inspector
+
+3. **Integration Testing:**
+   - Test with actual MCP clients (Claude Desktop, VS Code)
+   - Verify all tools, resources, and prompts work correctly
+   - Test error handling and edge cases
+
+### Environment Variables
+
+Projects may set environment variables via `.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "NODE_ENV": "development",
+    "LOG_LEVEL": "debug"
+  }
+}
+```
+
+These variables are available during development but should not be relied upon for server runtime behavior.
+
+### Best Practices for Claude Code Users
+
+1. **Set up SessionStart hooks** to install dependencies automatically
+2. **Configure PostToolUse hooks** to run linters/formatters after edits
+3. **Use permissions** to prevent accidental destructive operations
+4. **Enable sandbox** for safer command execution
+5. **Configure MCP servers** this repository provides via `.mcp.json`
+
+### Example .claude/settings.json for This Repository
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "permissions": {
+    "allow": [
+      "Bash(npm run build:*)",
+      "Bash(npm test:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)"
+    ],
+    "ask": [
+      "Bash(npm publish:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Read(.env)",
+      "Write(.env)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm install",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm run build --workspace=src/$SERVER --if-present",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "network": {
+      "allowLocalBinding": true
+    }
+  }
+}
+```
+
 ---
 
 **Last Updated:** 2025-11-16
